@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
-import sqlite3
 import logging
 import uuid
 import traceback
@@ -53,63 +52,40 @@ class Player:
     position: Position
     status: PlayerStatus
 
-# Gestionnaire de base de données
-class GameDB:
-    def __init__(self, db_name='game.db'):
-        self.db_name = db_name
-        self.init_db()
+# Stockage en mémoire des joueurs
+players_db = {}
 
-    def connect(self):
-        return sqlite3.connect(self.db_name)
-
-    def init_db(self):
-        conn = self.connect()
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS players (
-                id TEXT PRIMARY KEY,
-                login TEXT UNIQUE,
-                role TEXT,
-                x INTEGER,
-                y INTEGER,
-                status TEXT
-            )
-        ''')
-        conn.commit()
-        conn.close()
-
-    def add_player(self, player_id, login, role, x, y, status):
-        conn = self.connect()
-        cursor = conn.cursor()
-        cursor.execute(
-            'INSERT INTO players (id, login, role, x, y, status) VALUES (?, ?, ?, ?, ?, ?)',
-            (player_id, login, role, x, y, status)
-        )
-        conn.commit()
-        conn.close()
-
-    def update_position(self, player_id, x, y):
-        conn = self.connect()
-        cursor = conn.cursor()
-        cursor.execute('UPDATE players SET x = ?, y = ? WHERE id = ?', (x, y, player_id))
-        conn.commit()
-        conn.close()
-
-    def get_player(self, player_id):
-        conn = self.connect()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM players WHERE id = ?', (player_id,))
-        player = cursor.fetchone()
-        conn.close()
-        return player
-
-db = GameDB()
-
-def generate_initial_position() -> Tuple[int, int]:
-    return (0, 0)
+def generate_initial_position() -> Position:
+    return Position(0, 0)
 
 def generate_player_id() -> str:
     return str(uuid.uuid4())
+
+# Fonctions de gestion des joueurs
+def add_player(login: str, role: str) -> Player:
+    player_id = generate_player_id()
+    position = generate_initial_position()
+    
+    player = Player(
+        id=player_id,
+        login=login,
+        role=role,
+        position=position,
+        status=PlayerStatus.ALIVE.value
+    )
+    
+    players_db[player_id] = player
+    return player
+
+def update_position(player_id: str, x: int, y: int) -> Optional[Player]:
+    if player_id in players_db:
+        players_db[player_id].position.x = x
+        players_db[player_id].position.y = y
+        return players_db[player_id]
+    return None
+
+def get_player(player_id: str) -> Optional[Player]:
+    return players_db.get(player_id)
 
 # Gestion globale des erreurs
 @app.errorhandler(Exception)
@@ -134,16 +110,20 @@ def inscription():
     if role not in [r.value for r in Role]:
         return jsonify({"error": "Rôle invalide"}), 400
 
-    player_id = generate_player_id()
-    position = generate_initial_position()
-
-    try:
-        db.add_player(player_id, login, role, position[0], position[1], PlayerStatus.ALIVE.value)
-        logger.info(f"Nouveau joueur inscrit : {login}")
-        return jsonify({"player_id": player_id, "login": login, "role": role, "x": position[0], "y": position[1]}), 200
-
-    except sqlite3.IntegrityError:
+    # Vérifier si le login est déjà utilisé
+    if any(player.login == login for player in players_db.values()):
         return jsonify({"error": "Login déjà utilisé"}), 409
+
+    player = add_player(login, role)
+    logger.info(f"Nouveau joueur inscrit : {login}")
+    
+    return jsonify({
+        "player_id": player.id,
+        "login": player.login,
+        "role": player.role,
+        "x": player.position.x,
+        "y": player.position.y
+    }), 200
 
 @app.route('/api/v1/deplacement/<player_id>', methods=['POST'])
 def deplacement(player_id):
@@ -154,7 +134,11 @@ def deplacement(player_id):
     if new_x is None or new_y is None:
         return jsonify({"error": "Coordonnées manquantes"}), 400
 
-    db.update_position(player_id, new_x, new_y)
+    updated_player = update_position(player_id, new_x, new_y)
+    
+    if not updated_player:
+        return jsonify({"error": "Joueur non trouvé"}), 404
+        
     logger.info(f"Déplacement joueur {player_id} vers ({new_x}, {new_y})")
     return jsonify({"success": True, "position": {"x": new_x, "y": new_y}}), 200
 
